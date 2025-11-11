@@ -104,26 +104,36 @@ def coin_keyboard(exclude=None):
 def back_to_menu():
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Back", callback_data="home")]])
 
-# === LIVE PRICES ===
+# === LIVE PRICES (FIXED WITH RETRY & TIMEOUT) ===
 async def get_live_prices():
     url = "https://api.coingecko.com/api/v3/simple/price"
     params = {"ids": ",".join(COINGECKO_IDS.values()), "vs_currencies": "usd", "include_24hr_change": "true"}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as resp:
-                data = await resp.json()
-        lines = []
-        for sym in COINS:
-            cid = COINGECKO_IDS[sym]
-            p = data[cid]["usd"]
-            c = data[cid].get("usd_24h_change", 0)
-            arrow = "Up" if c > 0 else "Down"
-            lines.append(f"<b>{sym}</b>: ${p:,.2f} {arrow} {abs(c):.2f}%")
-        ts = datetime.now().strftime("%b %d, %Y %I:%M %p EAT")
-        return "\n".join(lines) + f"\n\n<i>Updated: {ts}</i>"
-    except Exception as e:
-        logging.error(f"Price error: {e}")
-        return "Warning: Prices unavailable."
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, params=params) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        lines = []
+                        for sym in COINS:
+                            cid = COINGECKO_IDS[sym]
+                            p = data[cid]["usd"]
+                            c = data[cid].get("usd_24h_change", 0)
+                            arrow = "↑" if c > 0 else "↓"
+                            lines.append(f"<b>{sym}</b>: ${p:,.2f} {arrow} {abs(c):.2f}%")
+                        ts = datetime.now().strftime("%b %d, %Y %I:%M %p EAT")
+                        return "\n".join(lines) + f"\n\n<i>Updated: {ts}</i>"
+                    else:
+                        raise Exception(f"HTTP {resp.status}")
+        except Exception as e:
+            logging.error(f"Price attempt {attempt+1} failed: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(2 ** attempt)
+            else:
+                return f"Warning: Prices temporarily unavailable (retrying...)\n\n<i>Updated: {datetime.now().strftime('%b %d, %Y %I:%M %p EAT')}</i>"
+    return "Warning: Prices unavailable — check connection."
 
 # === RATE CALCULATION ===
 async def get_rate(from_coin: str, to_coin: str) -> float:
@@ -161,13 +171,12 @@ async def cmd_start(message: types.Message):
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
     await message.answer(
-        "<b>swapStream Bot Description</b>\n\n"
-        "Instant, private, no-KYC crypto swaps. Any coin to any coin.\n"
-        "BTC • ETH • SOL • USDT • Monera\n\n"
+        "<b>swapStream Bot</b>\n\n"
+        "Private crypto swaps in Telegram.\n"
+        "No KYC. Instant. Secure.\n\n"
         "Commands:\n"
         "/start - Main menu\n"
-        "/help - This message\n\n"
-        "Use buttons for navigation.",
+        "/help - This info\n",
         parse_mode="HTML"
     )
 
@@ -230,8 +239,9 @@ async def menu_handler(callback: types.CallbackQuery, state: FSMContext):
     elif callback.data == "about":
         await callback.message.edit_text(
             "<b>About swapStream</b>\n\n"
-            "swapStream: Instant, private, no-KYC crypto swaps. Any coin to any coin.\n"
-            "BTC • ETH • SOL • USDT • Monera\n\n"
+            "swapStream: Instant, private, no-KYC crypto swaps.\n"
+            "Any coin to any coin.\n"
+            "BTC • ETH • SOL • USDT • Monero\n\n"
             "No registration. Fast and secure.",
             reply_markup=back_to_menu(),
             parse_mode="HTML"
@@ -311,8 +321,6 @@ async def handle_text(message: types.Message, state: FSMContext):
             parse_mode="HTML"
         )
         await state.clear()
-    else:
-        await message.answer("Use buttons or /start.")
 
 # === FINAL BUTTONS ===
 @dp.callback_query(lambda c: c.data == "copy_addr")
